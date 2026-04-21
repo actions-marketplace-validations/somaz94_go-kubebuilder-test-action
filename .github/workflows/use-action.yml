@@ -1,0 +1,82 @@
+name: Smoke Test (Released Action)
+
+on:
+  workflow_dispatch:
+    inputs:
+      run:
+        description: 'workflow run'
+        required: true
+        default: 'true'
+  workflow_run:
+    workflows: ["Create release"]
+    types:
+      - completed
+
+permissions:
+  contents: read
+
+jobs:
+  smoke-test-defaults:
+    name: Smoke Test (defaults)
+    runs-on: ubuntu-latest
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Run released action against fixture (defaults)
+        id: kbt
+        uses: somaz94/go-kubebuilder-test-action@v1
+        with:
+          working_directory: tests/fixtures/sample_operator
+
+      - name: Verify outputs
+        run: |
+          EXIT='${{ steps.kbt.outputs.test_exit_code }}'
+          DRIFT='${{ steps.kbt.outputs.manifests_drift }}'
+          echo "test_exit_code=${EXIT}"
+          echo "manifests_drift=${DRIFT}"
+          if [[ "${EXIT}" != "0" ]]; then
+            echo "::error::expected test_exit_code='0', got '${EXIT}'"
+            exit 1
+          fi
+          if [[ "${DRIFT}" != "false" ]]; then
+            echo "::error::expected manifests_drift='false', got '${DRIFT}'"
+            exit 1
+          fi
+          echo "[PASS] smoke test — defaults"
+
+  smoke-test-drift:
+    name: Smoke Test (drift detection)
+    runs-on: ubuntu-latest
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Run released action with an injected verify drift
+        id: kbt
+        uses: somaz94/go-kubebuilder-test-action@v1
+        continue-on-error: true
+        with:
+          working_directory: tests/fixtures/sample_operator
+          verify_command: 'echo "// drift introduced by smoke test" >> api/v1/doc.go'
+          verify_paths: 'api/'
+
+      - name: Assert drift detection fired
+        run: |
+          OUTCOME='${{ steps.kbt.outcome }}'
+          DRIFT='${{ steps.kbt.outputs.manifests_drift }}'
+          echo "outcome=${OUTCOME}"
+          echo "manifests_drift=${DRIFT}"
+          if [[ "${OUTCOME}" != "failure" ]]; then
+            echo "::error::expected action to fail when drift is introduced, got outcome='${OUTCOME}'"
+            exit 1
+          fi
+          if [[ "${DRIFT}" != "true" ]]; then
+            echo "::error::expected manifests_drift='true', got '${DRIFT}'"
+            exit 1
+          fi
+          echo "[PASS] smoke test — drift detection"

@@ -1,0 +1,183 @@
+name: Go Kubebuilder Test Action
+description: Run Go unit tests and verify kubebuilder-generated manifests/deepcopy are in sync, in one composite action.
+author: somaz94
+
+branding:
+  icon: check-circle
+  color: blue
+
+inputs:
+  go_version_file:
+    description: "Path to go.mod (or another file) used by actions/setup-go as 'go-version-file'. Ignored when 'go_version' is set."
+    required: false
+    default: 'go.mod'
+  go_version:
+    description: "Explicit Go version (e.g., '1.22'). Takes precedence over 'go_version_file' when non-empty."
+    required: false
+    default: ''
+  working_directory:
+    description: "Directory to run all commands in (Go module root)."
+    required: false
+    default: '.'
+  test_command:
+    description: "Test command executed from 'working_directory' (e.g., 'make test', 'go test ./...')."
+    required: false
+    default: 'make test'
+  run_mod_tidy:
+    description: "When 'true', run 'go mod tidy' before the test command. Matches the existing inline workflow behaviour."
+    required: false
+    default: 'true'
+  verify_manifests:
+    description: "When 'true', run 'verify_command' and fail the action if 'verify_paths' have any diff (i.e., generated code is stale)."
+    required: false
+    default: 'true'
+  verify_command:
+    description: "Command that regenerates manifests/deepcopy before the git-diff check (only used when 'verify_manifests' is 'true')."
+    required: false
+    default: 'make manifests generate'
+  verify_paths:
+    description: "Space-separated paths passed to 'git diff --exit-code --' after 'verify_command'. Defaults to kubebuilder layout."
+    required: false
+    default: 'config/ api/'
+  cache:
+    description: "Enable Go module/build cache in actions/setup-go."
+    required: false
+    default: 'true'
+
+outputs:
+  test_exit_code:
+    description: "Exit code of the test command (always '0' when the action succeeds; the action fails otherwise)."
+    value: ${{ steps.test.outputs.test_exit_code }}
+  manifests_drift:
+    description: "'true' when 'verify_command' produced changes under 'verify_paths' (the action also fails in that case); 'false' when clean or verification skipped."
+    value: ${{ steps.verify.outputs.manifests_drift }}
+
+runs:
+  using: composite
+  steps:
+    - name: Validate inputs
+      shell: bash
+      env:
+        GO_VERSION: ${{ inputs.go_version }}
+        GO_VERSION_FILE: ${{ inputs.go_version_file }}
+        WORKING_DIRECTORY: ${{ inputs.working_directory }}
+      run: |
+        set -euo pipefail
+        echo "::group::Validate inputs"
+
+        if [[ -z "${GO_VERSION// }" && -z "${GO_VERSION_FILE// }" ]]; then
+          echo "::error::either 'go_version' or 'go_version_file' must be set"
+          exit 1
+        fi
+
+        if [[ ! -d "$WORKING_DIRECTORY" ]]; then
+          echo "::error::working_directory '$WORKING_DIRECTORY' is not a directory"
+          exit 1
+        fi
+
+        if [[ -n "${GO_VERSION// }" ]]; then
+          echo "go_version=$GO_VERSION (explicit)"
+        else
+          echo "go_version_file=$GO_VERSION_FILE"
+          if [[ ! -f "$WORKING_DIRECTORY/$GO_VERSION_FILE" ]]; then
+            echo "::warning::go_version_file '$WORKING_DIRECTORY/$GO_VERSION_FILE' not found; actions/setup-go may fail"
+          fi
+        fi
+        echo "::endgroup::"
+
+    - name: Set up Go (from file)
+      if: inputs.go_version == ''
+      uses: actions/setup-go@v6
+      with:
+        go-version-file: ${{ inputs.working_directory == '.' && inputs.go_version_file || format('{0}/{1}', inputs.working_directory, inputs.go_version_file) }}
+        cache: ${{ inputs.cache }}
+
+    - name: Set up Go (explicit)
+      if: inputs.go_version != ''
+      uses: actions/setup-go@v6
+      with:
+        go-version: ${{ inputs.go_version }}
+        cache: ${{ inputs.cache }}
+
+    - name: go mod tidy
+      if: inputs.run_mod_tidy == 'true'
+      shell: bash
+      working-directory: ${{ inputs.working_directory }}
+      run: |
+        echo "::group::go mod tidy"
+        go mod tidy
+        echo "::endgroup::"
+
+    - name: Run tests
+      id: test
+      shell: bash
+      working-directory: ${{ inputs.working_directory }}
+      env:
+        TEST_COMMAND: ${{ inputs.test_command }}
+      run: |
+        set -euo pipefail
+        echo "::group::Run tests: $TEST_COMMAND"
+        bash -c "$TEST_COMMAND"
+        echo "::endgroup::"
+        echo "test_exit_code=0" >> "$GITHUB_OUTPUT"
+
+    - name: Verify generated manifests/deepcopy
+      id: verify
+      if: inputs.verify_manifests == 'true'
+      shell: bash
+      working-directory: ${{ inputs.working_directory }}
+      env:
+        VERIFY_COMMAND: ${{ inputs.verify_command }}
+        VERIFY_PATHS: ${{ inputs.verify_paths }}
+      run: |
+        set -euo pipefail
+        echo "::group::$VERIFY_COMMAND"
+        bash -c "$VERIFY_COMMAND"
+        echo "::endgroup::"
+
+        # shellcheck disable=SC2206
+        read -ra paths <<< "$VERIFY_PATHS"
+        if git diff --exit-code -- "${paths[@]}"; then
+          echo "manifests_drift=false" >> "$GITHUB_OUTPUT"
+          echo "[PASS] no drift under: ${paths[*]}"
+        else
+          echo "manifests_drift=true" >> "$GITHUB_OUTPUT"
+          echo "::error::Generated manifests or deepcopy are out of date. Run '$VERIFY_COMMAND' and commit the changes."
+          exit 1
+        fi
+
+    - name: Mark verify skipped
+      if: inputs.verify_manifests != 'true'
+      id: verify-skip
+      shell: bash
+      run: |
+        echo "manifests_drift=false" >> "$GITHUB_OUTPUT"
+        echo "::notice::verify_manifests=false — skipping manifest drift check"
+
+    - name: Summary
+      shell: bash
+      env:
+        TEST_COMMAND: ${{ inputs.test_command }}
+        VERIFY_ENABLED: ${{ inputs.verify_manifests }}
+        VERIFY_COMMAND: ${{ inputs.verify_command }}
+        VERIFY_PATHS: ${{ inputs.verify_paths }}
+        WORKING_DIRECTORY: ${{ inputs.working_directory }}
+      run: |
+        set -euo pipefail
+        if [[ -z "${GITHUB_STEP_SUMMARY:-}" ]]; then
+          exit 0
+        fi
+        {
+          echo "### Go Kubebuilder Test"
+          echo ""
+          echo "| Field | Value |"
+          echo "|-------|-------|"
+          echo "| Working directory | \`${WORKING_DIRECTORY}\` |"
+          echo "| Test command | \`${TEST_COMMAND}\` |"
+          echo "| Verify manifests | \`${VERIFY_ENABLED}\` |"
+          if [[ "${VERIFY_ENABLED}" == "true" ]]; then
+            echo "| Verify command | \`${VERIFY_COMMAND}\` |"
+            echo "| Verify paths | \`${VERIFY_PATHS}\` |"
+          fi
+          echo "| Result | :white_check_mark: pass |"
+        } >> "$GITHUB_STEP_SUMMARY"
