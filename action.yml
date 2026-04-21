@@ -123,14 +123,20 @@ runs:
 
     - name: Verify generated manifests/deepcopy
       id: verify
-      if: inputs.verify_manifests == 'true'
       shell: bash
       working-directory: ${{ inputs.working_directory }}
       env:
+        VERIFY_MANIFESTS: ${{ inputs.verify_manifests }}
         VERIFY_COMMAND: ${{ inputs.verify_command }}
         VERIFY_PATHS: ${{ inputs.verify_paths }}
       run: |
         set -euo pipefail
+        if [[ "$VERIFY_MANIFESTS" != "true" ]]; then
+          echo "manifests_drift=false" >> "$GITHUB_OUTPUT"
+          echo "::notice::verify_manifests=false — skipping manifest drift check"
+          exit 0
+        fi
+
         echo "::group::$VERIFY_COMMAND"
         bash -c "$VERIFY_COMMAND"
         echo "::endgroup::"
@@ -145,14 +151,6 @@ runs:
           echo "::error::Generated manifests or deepcopy are out of date. Run '$VERIFY_COMMAND' and commit the changes."
           exit 1
         fi
-
-    - name: Mark verify skipped
-      if: inputs.verify_manifests != 'true'
-      id: verify-skip
-      shell: bash
-      run: |
-        echo "manifests_drift=false" >> "$GITHUB_OUTPUT"
-        echo "::notice::verify_manifests=false — skipping manifest drift check"
 
     - name: Summary
       shell: bash

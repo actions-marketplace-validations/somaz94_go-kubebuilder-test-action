@@ -66,10 +66,10 @@ See [README.md](README.md) for the full table.
 2. **`actions/setup-go`** — gated on `go_version` being non-empty. When `working_directory != '.'`, `go-version-file` is rewritten to `${working_directory}/${go_version_file}` so `actions/setup-go` finds the right file from the repo root.
 3. **`go mod tidy`** — optional, on by default.
 4. **Test command** — `bash -c "$test_command"` from `working_directory`. `test_exit_code=0` is emitted only on success (the action fails on non-zero exit, matching every inline workflow it replaces).
-5. **Verify manifests** (when `verify_manifests=true`):
-   - Run `verify_command`
-   - `git diff --exit-code -- <verify_paths>` (space-split into an array so paths survive shell quoting)
-   - Clean → `manifests_drift=false`
-   - Dirty → `manifests_drift=true` + `::error::Generated manifests or deepcopy are out of date. Run '<verify_command>' and commit the changes.` + `exit 1`
-6. **Verify skip branch** — when `verify_manifests != 'true'`, emit `manifests_drift=false` and a notice.
-7. **Summary** — a markdown table (working directory / test command / verify settings / pass marker) is appended to `$GITHUB_STEP_SUMMARY`.
+5. **Verify manifests** — single step, branches on `verify_manifests`:
+   - `verify_manifests != 'true'` → emit `manifests_drift=false`, log a `::notice::`, exit 0
+   - `verify_manifests == 'true'` → run `verify_command`, then `git diff --exit-code -- <verify_paths>` (space-split into an array so paths survive shell quoting)
+     - Clean → `manifests_drift=false`
+     - Dirty → `manifests_drift=true` + `::error::Generated manifests or deepcopy are out of date. Run '<verify_command>' and commit the changes.` + `exit 1`
+   - The unified step ensures the `manifests_drift` top-level output is always populated (a separate skip-step would leave the output empty because composite `outputs.<name>.value` only tracks a single `steps.<id>`).
+6. **Summary** — a markdown table (working directory / test command / verify settings / pass marker) is appended to `$GITHUB_STEP_SUMMARY`.
